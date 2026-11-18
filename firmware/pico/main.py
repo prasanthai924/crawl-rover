@@ -1,7 +1,10 @@
 """Crawl Rover — Pico motor co-processor (MicroPython on RP2040).
 
 Real-time work the Pi 3 can't do reliably: motor PWM, steering servos, encoder
-counting, gyro heading, battery/dock sensing, and safety stops.
+counting, gyro heading, battery sensing, and safety stops.
+
+No charging happens on the rover: the battery pack is removed and charged by hand,
+attended, indoors (see docs/wiring.md).
 
 Protocol: one JSON object per line over USB serial (/dev/ttyACM0 on the Pi).
 
@@ -10,15 +13,14 @@ Protocol: one JSON object per line over USB serial (/dev/ttyACM0 on the Pi).
     {"cmd":"spin","rate":0.3}                 turn in place (watchdog)
     {"cmd":"move","dist":300,"heading":90,"v":0.4}   drive dist mm holding heading
     {"cmd":"turn_to","heading":90,"rate":0.4} spin to an absolute heading
-    {"cmd":"creep","v":0.15,"steer":0,"timeout_ms":2500}  dock approach, stops on contact
     {"cmd":"stop"} {"cmd":"zero"} {"cmd":"calibrate"} {"cmd":"status"}
     {"cmd":"light","on":true}
 
   Pico -> Pi
     telemetry every 100 ms: {"t":..,"mode":..,"x":..,"y":..,"hdg":..,"odo":..,
-                             "batt":..,"dock":..,"docked":..}
-    events: {"event":"ready"|"move_done"|"turn_done"|"docked"|"dock_timeout"|
-             "low_battery"|"watchdog"}, errors: {"error":"..."}
+                             "batt":..}
+    events: {"event":"ready"|"move_done"|"turn_done"|"low_battery"|"watchdog"},
+    errors: {"error":"..."}
 """
 import sys
 import time
@@ -180,7 +182,6 @@ class Rover:
         self.enc = {k: Encoder(a, b, C.ENCODER_SIGN[k]) for k, (a, b) in C.ENCODER_PINS.items()}
         self.gyro = Gyro(I2C(0, sda=Pin(C.I2C_SDA), scl=Pin(C.I2C_SCL), freq=400000))
         self.batt = Volts(C.ADC_BATT_PIN)
-        self.dock = Volts(C.ADC_DOCK_PIN)
         self.light = Pin(C.LIGHT_PIN, Pin.OUT, value=0)
 
         self.mode = "idle"
@@ -190,7 +191,6 @@ class Rover:
         self.x = 0.0
         self.y = 0.0
         self.move_start = 0.0
-        self.docked_hits = 0
         self.low_batt_sent = False
         self._last_counts = self._mid_counts()
         self.halt()
@@ -200,10 +200,7 @@ class Rover:
         return (self.enc["LM"].count + self.enc["RM"].count) / 2.0
 
     def rail_v(self):
-        return max(self.batt.value, self.dock.value) - C.DIODE_DROP_V
-
-    def docked(self):
-        return self.dock.value > C.DOCK_PRESENT_V
+        return self.batt.value
 
     def halt(self, mode="idle"):
         self.drive.stop()
@@ -234,20 +231,13 @@ class Rover:
             send({"event": "calibrated", "bias": self.gyro.bias})
         elif cmd == "light":
             self.light.value(1 if msg.get("on") else 0)
-        elif cmd in ("drive", "spin", "move", "turn_to", "creep"):
-            if self.batt.value < C.BATT_CRITICAL_V and not self.docked():
+        elif cmd in ("drive", "spin", "move", "turn_to"):
+            if self.batt.value < C.BATT_CRITICAL_V:
                 self.halt()
                 send({"event": "low_battery", "batt": self.batt.value, "refused": cmd})
                 return
             if cmd == "move":
                 self.move_start = self.odo
-            if cmd == "creep":
-                if self.mode == "creep":
-                    # steering update during approach: keep the original timeout clock
-                    msg["_start"] = self.cmd["_start"]
-                else:
-                    self.docked_hits = 0
-                    msg["_start"] = time.ticks_ms()
             self.cmd = msg               # only motion commands replace the active command
             self.cmd_time = time.ticks_ms()   # feeds the watchdog
             self.mode = cmd
@@ -258,7 +248,6 @@ class Rover:
     def step(self, dt_s):
         self.gyro.update(dt_s)
         self.batt.update()
-        self.dock.update()
 
         counts = self._mid_counts()
         d = (counts - self._last_counts) * self.mm_per_count
@@ -268,7 +257,7 @@ class Rover:
         self.x += d * math.cos(h)
         self.y += d * math.sin(h)
 
-        if self.batt.value < C.BATT_WARN_V and not self.low_batt_sent and not self.docked():
+        if self.batt.value < C.BATT_WARN_V and not self.low_batt_sent:
             self.low_batt_sent = True
             send({"event": "low_battery", "batt": self.batt.value})
         if self.batt.value >= C.BATT_WARN_V + 0.2:
@@ -286,8 +275,6 @@ class Rover:
 
         if m == "drive":
             v = clamp(float(c.get("v", 0)), -1.0, 1.0)
-            if self.docked() and v > 0:
-                v = 0.0                                  # don't push into the dock wall
             self.apply(*kin.car(self.geo, v, float(c.get("steer", 0))))
 
         elif m == "spin":
@@ -319,29 +306,12 @@ class Rover:
             rate = math.copysign(max(abs(rate), C.TURN_MIN_RATE), rate)
             self.apply(*kin.spin(self.geo, rate))
 
-        elif m == "creep":
-            if self.docked():
-                self.docked_hits += 1
-                if self.docked_hits >= 3:              # ~60 ms of solid contact
-                    self.halt()
-                    send({"event": "docked", "dock": self.dock.value})
-                    return
-            else:
-                self.docked_hits = 0
-            if time.ticks_diff(time.ticks_ms(), c["_start"]) > int(c.get("timeout_ms", 2500)):
-                self.halt()
-                send({"event": "dock_timeout"})
-                return
-            v = clamp(abs(float(c.get("v", 0.15))), 0.0, 0.3)
-            self.apply(*kin.car(self.geo, v, float(c.get("steer", 0))))
-
     def telemetry(self):
         send({
             "t": time.ticks_ms(), "mode": self.mode,
             "x": round(self.x, 1), "y": round(self.y, 1),
             "hdg": round(self.gyro.heading, 2), "odo": round(self.odo, 1),
-            "batt": round(self.batt.value, 2), "dock": round(self.dock.value, 2),
-            "docked": self.docked(),
+            "batt": round(self.batt.value, 2),
         })
 
 

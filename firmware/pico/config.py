@@ -22,11 +22,9 @@ ENCODER_SIGN = {"LM": 1, "RM": -1}                # flip so forward = positive
 I2C_SDA, I2C_SCL = 20, 21
 GYRO_SIGN = 1            # flip if heading goes negative when turning left
 
-# --- Voltage sense (100k / 22k dividers) ---------------------------------
+# --- Battery sense (100k / 22k divider) ----------------------------------
 ADC_BATT_PIN = 26
-ADC_DOCK_PIN = 27
 DIVIDER_RATIO = (100 + 22) / 22
-DIODE_DROP_V = 0.35
 
 # --- Geometry (mm) --------------------------------------------------------
 FRONT_X_MM = 120
@@ -52,7 +50,6 @@ SERVO_SETTLE_MS = 250    # pause motors after a big steering change
 # --- Power thresholds (2S Li-ion) ----------------------------------------
 BATT_WARN_V = 6.9
 BATT_CRITICAL_V = 6.6    # stop driving below this (keeps the 5V buck in regulation)
-DOCK_PRESENT_V = 9.0
 
 # --- Control --------------------------------------------------------------
 CONTROL_MS = 20          # 50 Hz control loop

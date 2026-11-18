@@ -1,46 +1,53 @@
 # Wiring
 
-> ⚠️ Lithium cells left charging unattended deserve respect: use a 2S BMS, the fuses shown,
-> and a temperature sensor near the dock. Bench-test the charging path before installing.
+## Safety model: no charging under the house
+
+The rover **never charges itself**. The battery pack unplugs (XT30) and is charged by hand,
+indoors, while someone is home. Between runs the rover is switched off, so nothing under
+the house is live except a disconnected, BMS-protected pack. This removes the main fire
+risk of a self-docking design (unattended lithium charging, possibly below freezing).
 
 ## Power path
 
-The dock and the battery are **diode-OR'd** onto one rail. When docked, the dock's 12 V is
-higher than the pack, so the rover runs from wall power and the pack charges with no load
-(the charger can terminate properly instead of holding the cells at 100%).
-
 ```
-          DOCK                                          ROVER
- 12V 2A adapter ─[1.5A polyfuse]─ brass +12V ════ pogo + ──┬───────────────► TP5100 IN+  (2S / 8.4V, 1A)
-                                  brass GND  ════ pogo − ──┼───────────────► TP5100 IN−
-                                                           │                   │
-                                                           │      TP5100 OUT+ ─┴─► pack P+
-                                                           │      TP5100 OUT− ───► pack P−
-                                                           │
-                                                           ├─[100k]─┬─► Pico GP27  (dock sense)
-                                                           │        └─[22k]── GND
-                                                           │
-                                                           └──►|── D1 Schottky (SS54) ──┐
-                                                                                        │
- 2× 18650 + 2S BMS   P+ ──[2A fuse]──►|── D2 Schottky (SS54) ─────────────────────────────┤
-                     P+ ─[100k]─┬─► Pico GP26  (battery sense)                           │  RAIL
-                                └─[22k]── GND                                            │  6.2–11.7 V
-                     P− ── GND bus                                                       │
-                                                                                         ├─► TB6612 ×3  VM   (+470µF)
-                                                                                         ├─► 5V 3A buck ──► Pi 3 GPIO pin 2 (5V) / pin 6 (GND)
-                                                                                         └─► 6V 3A buck ──► 4× servo V+       (+470µF)
+ 2× 18650 (2S) + balancing 2S BMS
+        P+ ──► XT30 ──► main switch ──► 3A fuse ──┬────────────────────────────► RAIL (6.0–8.4 V)
+        P− ──► XT30 ──────────────────────────────┼─ GND bus                          │
+        balance lead (JST-XH 3-pin) — for the charger only                          │
+                                                  │                                    ├─► TB6612 ×3  VM   (+470µF)
+                                                  ├─[100k]─┬─► Pico GP26 (battery)    ├─► 5V 3A buck ──► Pi 3 GPIO pin 2 (5V) / pin 6 (GND)
+                                                  │        └─[22k]── GND              └─► 6V 3A buck ──► 4× servo V+       (+470µF)
 
  Pi 3 USB ── micro-USB cable ──► Pico   (powers the Pico + serial link /dev/ttyACM0)
  All grounds common.
 ```
 
 Notes
-- **5 V buck must stay in regulation down to ~6.2 V input** (critical battery 6.6 V minus
-  the diode drop). Check yours on a bench supply; if it sags, use a 5 V buck-boost module.
-  Feeding the Pi through GPIO bypasses its polyfuse, so get this one right.
-- Keep the brass strips ≥15 mm apart, + on top, GND below; horizontal strips make
-  polarity impossible to swap and tolerate a few cm of sideways misalignment.
-- The battery reading shows charger voltage (~8.4 V) while docked; that's expected.
+- The battery divider sits **after** the switch, so a parked, switched-off rover draws nothing.
+- **5 V buck must stay in regulation down to ~6.4 V input** (firmware stops driving at
+  6.6 V). Check yours on a bench supply; if it sags, use a 5 V buck-boost module. Feeding
+  the Pi through GPIO bypasses its polyfuse, so get this one right.
+- Use a BMS with cell balancing and per-cell over-charge / over-discharge cutoff, and
+  cells from a reputable seller (counterfeit/rewrapped 18650s are common on marketplaces).
+- Run wires in split loom; crawl-space rodents chew insulation.
+
+## Charging the pack (by hand)
+
+1. Unplug the pack from the rover and bring it indoors.
+2. **If the crawl space was cold, let the pack reach room temperature first (~1 hour).**
+   Charging lithium cells below 0 °C damages them and raises later short-circuit risk.
+3. Charge with a hobby **balance charger** (2S Li-ion profile, 4.2 V/cell, ≤1 A) using the
+   balance lead, on a non-flammable surface, while you're home.
+4. Optional: charge inside a LiPo-safe bag.
+
+## Weekly routine
+
+1. Plug in a charged pack at the crawl-space hatch and flip the switch.
+2. Pi boots; start the run from the phone UI or a Home Assistant button
+   (a weekly HA reminder works well).
+3. Rover replays the taught route, photographs each stop, returns to the hatch.
+4. Photos upload (Wi-Fi is strongest at the hatch); Pi shuts itself down cleanly.
+5. Switch off, take the pack out, charge it.
 
 ## Pico pin map
 
@@ -66,7 +73,7 @@ Notes
 | GP18 / GP19 | RM encoder A / B | |
 | GP20 / GP21 | I2C0 SDA / SCL | MPU6050 (3.3 V) |
 | GP26 (ADC0) | Battery sense | 100k/22k divider |
-| GP27 (ADC1) | Dock sense | 100k/22k divider |
+| GP27, GP28, GP22 | spare | |
 | 3V3 | Logic power | TB6612 VCC ×3, MPU6050 VCC, encoder VCC |
 
 Why the shared direction pins: every wheel on one side always turns the same way (in

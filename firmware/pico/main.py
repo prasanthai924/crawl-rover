@@ -1,6 +1,9 @@
 """Crawl Rover — Pico motor co-processor (MicroPython on RP2040).
 
-Differential drive: two driven wheels with encoders + a ball caster.
+4WD skid-steer: four driven wheels, each with an encoder. Front and rear wheels on
+a side are driven together, so the rover steers like a tank (left vs right speed).
+Route replay turns in place with the gyro (`turn_to`) and drives straight segments
+(`move`), so wheel scrub during turns doesn't affect measured distance.
 Real-time work the Pi 3 can't do reliably: motor PWM, encoder counting, gyro
 heading, battery sensing, and safety stops (watchdog, stall, low battery).
 
@@ -45,7 +48,8 @@ def send(obj):
 
 # --------------------------------------------------------------------------- hardware
 class Motor:
-    """One TB6612 board with both channels paralleled (IN1/IN2/PWM tied A+B)."""
+    """One side of the rover: a TB6612 board with IN1/IN2/PWM of channels A and B
+    tied together, so its front (A) and rear (B) motors always get the same command."""
 
     def __init__(self, pwm_pin, in1, in2):
         self.pwm = PWM(Pin(pwm_pin))
@@ -201,8 +205,9 @@ class Rover:
     # ---- stall detection
     def _stalled(self, counts):
         now = time.ticks_ms()
-        for k in ("L", "R"):
-            if counts[k] != self._last[k] or abs(self.out[k]) < C.STALL_MIN_SPEED:
+        for k in counts:                      # "LF", "LR", "RF", "RR"
+            side = k[0]                       # its side's command: "L" or "R"
+            if counts[k] != self._last[k] or abs(self.out[side]) < C.STALL_MIN_SPEED:
                 self._moving_since[k] = now
             elif time.ticks_diff(now, self._moving_since[k]) > C.STALL_MS:
                 return k
@@ -214,7 +219,10 @@ class Rover:
         self.batt.update()
 
         counts = {k: e.count for k, e in self.enc.items()}
-        d = ((counts["L"] - self._last["L"]) + (counts["R"] - self._last["R"])) / 2.0 * self.mm_per_count
+        delta = {k: counts[k] - self._last[k] for k in counts}
+        d_left = (delta["LF"] + delta["LR"]) / 2.0
+        d_right = (delta["RF"] + delta["RR"]) / 2.0
+        d = (d_left + d_right) / 2.0 * self.mm_per_count
         self.odo += d
         h = math.radians(self.gyro.heading)
         self.x += d * math.cos(h)

@@ -1,4 +1,5 @@
-"""Differential-drive mixing: two driven wheels + a ball caster.
+"""Left/right mixing for a 4WD skid-steer rover (front and rear wheels on a side
+turn together, so it's driven like a differential-drive robot).
 
 Pure Python: runs on the Pico (MicroPython) and on a laptop (CPython) so it can be
 unit-tested without hardware.

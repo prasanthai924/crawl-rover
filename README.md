@@ -1,12 +1,13 @@
 # Crawl Rover
 
-A ~$175, 3D-printable rover that patrols a crawl space, photographs it, and uses an LLM
+A ~$225, 3D-printable rover that patrols a crawl space, photographs it, and uses an LLM
 vision model to flag changes (water, cracks, pests, insulation damage) week over week.
 
 Started as a shrunk-down [NASA-JPL Open Source Rover](https://github.com/nasa-jpl/open-source-rover);
-for flat concrete floors it's now a simple **differential-drive** robot (two driven wheels
-plus a ball caster), the same layout robot vacuums use: fewest parts, and the most
-accurate for replaying a route because no wheel skids sideways when turning.
+for flat concrete floors it's now a **4WD skid-steer** robot: four driven wheels with
+encoders, steered like a tank, with no steering servos. Route replay turns in place on
+the gyro and measures distance only on straight runs, so tyre scrub during turns
+doesn't throw the route off.
 
 **Safety by design:** the rover never charges under the house. Its battery pack unplugs
 and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.md).
@@ -14,7 +15,7 @@ and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.m
 ## How it works
 
 ```
- phone / Home Assistant ──► Pi 3 (Docker) ──USB serial──► Pico ──► 2 motors
+ phone / Home Assistant ──► Pi 3 (Docker) ──USB serial──► Pico ──► 4 motors
                                │  camera                    │      encoders, gyro, battery sense
                                │                            │
                                ▼                            ▼
@@ -32,13 +33,12 @@ and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.m
 3. **Analyse** — back at the hatch, photos upload and a server compares them with last
    week's. The Pi then shuts down; you switch off and take the pack to charge.
 
-## Hardware (~$175 + charger)
+## Hardware (~$225 + charger)
 
 | Part | Qty | Est. |
 |---|---|---|
-| JGA25-370 6V 108 RPM gear motor with hall encoder | 2 | $36 (generic ~$16) |
-| TB6612FNG driver (Pololu 713), one per motor, channels paralleled | 2 | $10 |
-| Pololu ball caster, 3/4" metal ball | 1 | $5 |
+| JGA25-370 6V 108 RPM gear motor with hall encoder | 4 | $72 (generic ~$32) |
+| TB6612FNG driver (Pololu 713), one per side | 2 | $10 |
 | Raspberry Pi Pico | 1 | $5 |
 | MPU-6050 IMU | 1 | $3–13 |
 | Arducam OV5647 camera (M12 lens) | 1 | $16 |
@@ -65,8 +65,8 @@ hardware/               CAD (coming)
 
 ## Status
 
-- [x] Differential-drive mixing — tested
-- [x] Pico firmware: motors, encoders, gyro, battery sense, stall + watchdog stops, JSON serial protocol
+- [x] Skid-steer left/right mixing — tested
+- [x] Pico firmware: 4 motors, 4 encoders, gyro, battery sense, stall + watchdog stops, JSON serial protocol
 - [x] Wiring, removable-pack power path, manual charging procedure
 - [x] Docker setup for the Pi 3
 - [ ] Pi app: phone joystick, teach recording, replay, AprilTag drift correction, clean shutdown

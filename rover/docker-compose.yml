@@ -1,0 +1,25 @@
+services:
+  rover:
+    build: .
+    image: crawl-rover:latest
+    container_name: crawl-rover
+    restart: unless-stopped
+
+    # Camera (libcamera) needs /dev/media*, /dev/video*, /dev/vchiq, /dev/dma_heap;
+    # the Pico shows up as /dev/ttyACM0. privileged is the least fiddly way on a Pi.
+    privileged: true
+    volumes:
+      - /run/udev:/run/udev:ro        # lets libcamera discover the camera
+      - ./data:/data                  # routes + photos survive container rebuilds
+
+    ports:
+      - "8080:8080"                   # phone joystick + API
+
+    environment:
+      PICO_PORT: /dev/ttyACM0         # Pico handles motors, encoders, IMU
+      DATA_DIR: /data
+      # Photos are pushed here after a run; the EliteDesk does the Claude analysis
+      UPLOAD_URL: ${UPLOAD_URL}       # set in rover/.env (git-ignored), see .env.example
+
+    # Pi 3 has 1 GB RAM — keep the rover from starving the OS
+    mem_limit: 600m

@@ -1,0 +1,11 @@
+# Your home stays out of the repo
+rover/data/
+*.jpg
+*.png
+!docs/**/*.png
+.env
+*.secret
+
+__pycache__/
+*.pyc
+.DS_Store

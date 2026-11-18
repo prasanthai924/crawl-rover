@@ -1,12 +1,12 @@
 # Crawl Rover
 
-A ~$200, 30 cm, 3D-printable rocker-bogie rover that patrols a crawl space, photographs it,
-and uses an LLM vision model to flag changes (water, cracks, pests, insulation damage)
-week over week.
+A ~$175, 3D-printable rover that patrols a crawl space, photographs it, and uses an LLM
+vision model to flag changes (water, cracks, pests, insulation damage) week over week.
 
-Inspired by [NASA-JPL's Open Source Rover](https://github.com/nasa-jpl/open-source-rover)
-and Roger Cheng's [Sawppy](https://github.com/Roger-random/Sawppy_Rover). Shrunk, simplified
-and pointed at one boring, useful job.
+Started as a shrunk-down [NASA-JPL Open Source Rover](https://github.com/nasa-jpl/open-source-rover);
+for flat concrete floors it's now a simple **differential-drive** robot (two driven wheels
+plus a ball caster), the same layout robot vacuums use: fewest parts, and the most
+accurate for replaying a route because no wheel skids sideways when turning.
 
 **Safety by design:** the rover never charges under the house. Its battery pack unplugs
 and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.md).
@@ -14,7 +14,7 @@ and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.m
 ## How it works
 
 ```
- phone / Home Assistant ──► Pi 3 (Docker) ──USB serial──► Pico ──► 6 motors, 4 steering servos
+ phone / Home Assistant ──► Pi 3 (Docker) ──USB serial──► Pico ──► 2 motors
                                │  camera                    │      encoders, gyro, battery sense
                                │                            │
                                ▼                            ▼
@@ -32,30 +32,31 @@ and is charged by hand, indoors and attended. See [docs/wiring.md](docs/wiring.m
 3. **Analyse** — back at the hatch, photos upload and a server compares them with last
    week's. The Pi then shuts down; you switch off and take the pack to charge.
 
-## Hardware (~$200)
+## Hardware (~$175 + charger)
 
-| Part | Est. |
-|---|---|
-| 6× N20 6V gear motors w/ hall encoders | $50 |
-| 4× MG90S metal-gear servos (corner steering) | $15 |
-| 3× TB6612FNG motor drivers | $12 |
-| Raspberry Pi Pico | $5 |
-| MPU6050 IMU | $5 |
-| Pi Camera Module 3 Wide | $35 |
-| LED headlights + MOSFET | $10 |
-| 2× 18650 (reputable seller) + balancing 2S BMS + XT30 + switch + fuse | $25 |
-| 5V 3A + 6V 3A buck converters | $12 |
-| PETG + TPU filament | $25 |
-| 623 bearings, M3 hardware, wire, split loom | $15 |
-| 2S balance charger (skip if you own one) | $25 |
-| Raspberry Pi 3 Model B | (reused) |
+| Part | Qty | Est. |
+|---|---|---|
+| JGA25-370 6V 108 RPM gear motor with hall encoder | 2 | $36 (generic ~$16) |
+| TB6612FNG driver (Pololu 713), one per motor, channels paralleled | 2 | $10 |
+| Pololu ball caster, 3/4" metal ball | 1 | $5 |
+| Raspberry Pi Pico | 1 | $5 |
+| MPU-6050 IMU | 1 | $3–13 |
+| Arducam OV5647 camera (M12 lens) | 1 | $16 |
+| Pololu D36V28F5 5V 3.2A regulator (low dropout, for the Pi) | 1 | $22 |
+| Molicel P28A 18650 | 2 | $12 |
+| 2S balancing BMS + 4-wire 2×18650 holder | 1 | $12 |
+| XT30 connectors, switch, 3A fuse + holder | 1 | $15 |
+| LED headlights + AO3400 MOSFET, wire, split loom, M3 kit | 1 | $15 |
+| PETG filament (chassis, wheels) + O-rings | 1 | $18 |
+| Raspberry Pi 3 Model B | 1 | (reused) |
+| Balance charger with Li-ion profile (+ DC supply) — skip if you own one | 1 | $35–55 |
 
-Prices are rough estimates; shop around.
+Prices are rough estimates from US sellers; shop around.
 
 ## Repo layout
 
 ```
-docs/wiring.md          power path, charging, weekly routine, Pico pin map
+docs/wiring.md          power path, charging, weekly routine, Pico pin map, mechanical notes
 firmware/pico/          MicroPython: main.py, config.py, kinematics.py
 rover/                  Pi 3 software, runs in Docker (app/ in progress)
 tests/                  laptop-runnable tests (python3 tests/test_kinematics.py)
@@ -64,13 +65,13 @@ hardware/               CAD (coming)
 
 ## Status
 
-- [x] Steering + wheel-speed kinematics (Ackermann, 4-wheel steer, spin in place) — tested
-- [x] Pico firmware: motors, servos, encoders, gyro, battery sense, JSON serial protocol
+- [x] Differential-drive mixing — tested
+- [x] Pico firmware: motors, encoders, gyro, battery sense, stall + watchdog stops, JSON serial protocol
 - [x] Wiring, removable-pack power path, manual charging procedure
 - [x] Docker setup for the Pi 3
 - [ ] Pi app: phone joystick, teach recording, replay, AprilTag drift correction, clean shutdown
 - [ ] Photo upload + LLM comparison service
-- [ ] CAD: rocker, bogie, differential, body, battery bay
+- [ ] CAD: chassis, wheels, motor mounts, battery bay
 - [ ] First crawl-space run
 
 ## Flashing the Pico

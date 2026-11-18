@@ -1,7 +1,8 @@
 """Crawl Rover — Pico motor co-processor (MicroPython on RP2040).
 
-Real-time work the Pi 3 can't do reliably: motor PWM, steering servos, encoder
-counting, gyro heading, battery sensing, and safety stops.
+Differential drive: two driven wheels with encoders + a ball caster.
+Real-time work the Pi 3 can't do reliably: motor PWM, encoder counting, gyro
+heading, battery sensing, and safety stops (watchdog, stall, low battery).
 
 No charging happens on the rover: the battery pack is removed and charged by hand,
 attended, indoors (see docs/wiring.md).
@@ -9,7 +10,7 @@ attended, indoors (see docs/wiring.md).
 Protocol: one JSON object per line over USB serial (/dev/ttyACM0 on the Pi).
 
   Pi -> Pico
-    {"cmd":"drive","v":0.4,"steer":12}       manual Ackermann drive (watchdog 500 ms)
+    {"cmd":"drive","v":0.4,"turn":0.1}        manual drive (watchdog 500 ms)
     {"cmd":"spin","rate":0.3}                 turn in place (watchdog)
     {"cmd":"move","dist":300,"heading":90,"v":0.4}   drive dist mm holding heading
     {"cmd":"turn_to","heading":90,"rate":0.4} spin to an absolute heading
@@ -17,9 +18,8 @@ Protocol: one JSON object per line over USB serial (/dev/ttyACM0 on the Pi).
     {"cmd":"light","on":true}
 
   Pico -> Pi
-    telemetry every 100 ms: {"t":..,"mode":..,"x":..,"y":..,"hdg":..,"odo":..,
-                             "batt":..}
-    events: {"event":"ready"|"move_done"|"turn_done"|"low_battery"|"watchdog"},
+    telemetry every 100 ms: {"t":..,"mode":..,"x":..,"y":..,"hdg":..,"odo":..,"batt":..}
+    events: {"event":"ready"|"move_done"|"turn_done"|"low_battery"|"watchdog"|"stalled"},
     errors: {"error":"..."}
 """
 import sys
@@ -32,6 +32,8 @@ from machine import Pin, PWM, ADC, I2C
 import config as C
 import kinematics as kin
 
+MOTION_CMDS = ("drive", "spin", "move", "turn_to")
+
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -42,76 +44,27 @@ def send(obj):
 
 
 # --------------------------------------------------------------------------- hardware
-class Drive:
-    def __init__(self):
-        self.pwm = {}
-        for name, pin in C.MOTOR_PWM_PINS.items():
-            p = PWM(Pin(pin))
-            p.freq(C.MOTOR_PWM_HZ)
-            p.duty_u16(0)
-            self.pwm[name] = p
-        self.l1 = Pin(C.LEFT_IN1, Pin.OUT, value=0)
-        self.l2 = Pin(C.LEFT_IN2, Pin.OUT, value=0)
-        self.r1 = Pin(C.RIGHT_IN1, Pin.OUT, value=0)
-        self.r2 = Pin(C.RIGHT_IN2, Pin.OUT, value=0)
-        self.stby = Pin(C.STBY_PIN, Pin.OUT, value=0)
+class Motor:
+    """One TB6612 board with both channels paralleled (IN1/IN2/PWM tied A+B)."""
 
-    @staticmethod
-    def _dir(in1, in2, sign):
-        if sign > 0:
-            in1.value(1); in2.value(0)
-        elif sign < 0:
-            in1.value(0); in2.value(1)
-        else:                       # short brake
-            in1.value(1); in2.value(1)
+    def __init__(self, pwm_pin, in1, in2):
+        self.pwm = PWM(Pin(pwm_pin))
+        self.pwm.freq(C.MOTOR_PWM_HZ)
+        self.pwm.duty_u16(0)
+        self.in1 = Pin(in1, Pin.OUT, value=0)
+        self.in2 = Pin(in2, Pin.OUT, value=0)
 
-    def set(self, speeds, rail_v):
-        """speeds: {wheel: -1..1}. Direction pins are shared per side, so the side
-        direction follows its middle wheel; a corner disagreeing with it gets 0."""
-        scale = C.MOTOR_NOMINAL_V / max(rail_v, 1.0)
-        for side, mid, pins in (("L", "LM", (self.l1, self.l2)), ("R", "RM", (self.r1, self.r2))):
-            s_mid = speeds.get(mid, 0.0)
-            sign = 1 if s_mid > 0.001 else -1 if s_mid < -0.001 else 0
-            self._dir(pins[0], pins[1], sign)
-            for w in (side + "F", side + "M", side + "R"):
-                s = speeds.get(w, 0.0)
-                if sign == 0 or s * sign < 0:
-                    s = 0.0
-                self.pwm[w].duty_u16(int(clamp(abs(s) * scale, 0.0, 1.0) * 65535))
-        self.stby.value(1)
+    def set(self, speed, scale):
+        if speed > 0.001:
+            self.in1.value(1); self.in2.value(0)
+        elif speed < -0.001:
+            self.in1.value(0); self.in2.value(1)
+        else:                                   # short brake
+            self.in1.value(1); self.in2.value(1)
+        self.pwm.duty_u16(int(clamp(abs(speed) * scale, 0.0, 1.0) * 65535))
 
     def stop(self):
-        for p in self.pwm.values():
-            p.duty_u16(0)
-        self._dir(self.l1, self.l2, 0)
-        self._dir(self.r1, self.r2, 0)
-
-
-class Steering:
-    def __init__(self):
-        self.pwm = {}
-        self.last = {}
-        for name, pin in C.SERVO_PINS.items():
-            p = PWM(Pin(pin))
-            p.freq(50)
-            self.pwm[name] = p
-            self.last[name] = 999.0
-        self.settle_until = time.ticks_ms()
-
-    def set(self, angles):
-        big_change = False
-        for name, deg in angles.items():
-            if abs(deg - self.last[name]) > 10:
-                big_change = True
-            self.last[name] = deg
-            us = 1500 + C.SERVO_TRIM_US[name] + C.SERVO_SIGN[name] * deg * C.SERVO_US_PER_DEG
-            us = clamp(us, C.SERVO_MIN_US, C.SERVO_MAX_US)
-            self.pwm[name].duty_ns(int(us * 1000))
-        if big_change:
-            self.settle_until = time.ticks_add(time.ticks_ms(), C.SERVO_SETTLE_MS)
-
-    def settling(self):
-        return time.ticks_diff(self.settle_until, time.ticks_ms()) > 0
+        self.set(0.0, 0.0)
 
 
 class Encoder:
@@ -175,10 +128,10 @@ class Volts:
 # --------------------------------------------------------------------------- rover
 class Rover:
     def __init__(self):
-        self.geo = kin.Geometry(C.FRONT_X_MM, C.REAR_X_MM, C.TRACK_MM, C.MAX_STEER_DEG)
         self.mm_per_count = math.pi * C.WHEEL_DIAM_MM / C.COUNTS_PER_WHEEL_REV
-        self.drive = Drive()
-        self.steer = Steering()
+        self.left = Motor(C.LEFT_PWM, C.LEFT_IN1, C.LEFT_IN2)
+        self.right = Motor(C.RIGHT_PWM, C.RIGHT_IN1, C.RIGHT_IN2)
+        self.stby = Pin(C.STBY_PIN, Pin.OUT, value=0)
         self.enc = {k: Encoder(a, b, C.ENCODER_SIGN[k]) for k, (a, b) in C.ENCODER_PINS.items()}
         self.gyro = Gyro(I2C(0, sda=Pin(C.I2C_SDA), scl=Pin(C.I2C_SCL), freq=400000))
         self.batt = Volts(C.ADC_BATT_PIN)
@@ -187,36 +140,33 @@ class Rover:
         self.mode = "idle"
         self.cmd = {}
         self.cmd_time = time.ticks_ms()
-        self.odo = 0.0          # signed distance travelled, mm
+        self.odo = 0.0          # signed distance travelled by the body centre, mm
         self.x = 0.0
         self.y = 0.0
         self.move_start = 0.0
         self.low_batt_sent = False
-        self._last_counts = self._mid_counts()
+        self.out = {"L": 0.0, "R": 0.0}                 # last commanded wheel speeds
+        self._last = {k: e.count for k, e in self.enc.items()}
+        self._moving_since = {k: time.ticks_ms() for k in self.enc}
         self.halt()
 
     # ---- helpers
-    def _mid_counts(self):
-        return (self.enc["LM"].count + self.enc["RM"].count) / 2.0
-
-    def rail_v(self):
-        return self.batt.value
-
     def halt(self, mode="idle"):
-        self.drive.stop()
+        self.left.stop()
+        self.right.stop()
+        self.out["L"] = self.out["R"] = 0.0
         self.mode = mode
 
-    def apply(self, angles, speeds):
-        self.steer.set(angles)
-        if self.steer.settling():
-            self.drive.stop()
-        else:
-            self.drive.set(speeds, self.rail_v())
+    def apply(self, left, right):
+        scale = C.MOTOR_NOMINAL_V / max(self.batt.value, 1.0)
+        self.left.set(left, scale)
+        self.right.set(right, scale)
+        self.stby.value(1)
+        self.out["L"], self.out["R"] = left, right
 
     # ---- commands
     def handle(self, msg):
         cmd = msg.get("cmd")
-
         if cmd == "stop":
             self.halt()
         elif cmd == "status":
@@ -231,27 +181,40 @@ class Rover:
             send({"event": "calibrated", "bias": self.gyro.bias})
         elif cmd == "light":
             self.light.value(1 if msg.get("on") else 0)
-        elif cmd in ("drive", "spin", "move", "turn_to"):
+        elif cmd in MOTION_CMDS:
             if self.batt.value < C.BATT_CRITICAL_V:
                 self.halt()
                 send({"event": "low_battery", "batt": self.batt.value, "refused": cmd})
                 return
             if cmd == "move":
                 self.move_start = self.odo
-            self.cmd = msg               # only motion commands replace the active command
-            self.cmd_time = time.ticks_ms()   # feeds the watchdog
+            if self.mode != cmd:
+                now = time.ticks_ms()
+                for k in self._moving_since:          # fresh start for stall timers
+                    self._moving_since[k] = now
+            self.cmd = msg                  # only motion commands replace the active command
+            self.cmd_time = time.ticks_ms() # feeds the watchdog
             self.mode = cmd
         else:
             send({"error": "unknown cmd", "cmd": cmd})
+
+    # ---- stall detection
+    def _stalled(self, counts):
+        now = time.ticks_ms()
+        for k in ("L", "R"):
+            if counts[k] != self._last[k] or abs(self.out[k]) < C.STALL_MIN_SPEED:
+                self._moving_since[k] = now
+            elif time.ticks_diff(now, self._moving_since[k]) > C.STALL_MS:
+                return k
+        return None
 
     # ---- 50 Hz control
     def step(self, dt_s):
         self.gyro.update(dt_s)
         self.batt.update()
 
-        counts = self._mid_counts()
-        d = (counts - self._last_counts) * self.mm_per_count
-        self._last_counts = counts
+        counts = {k: e.count for k, e in self.enc.items()}
+        d = ((counts["L"] - self._last["L"]) + (counts["R"] - self._last["R"])) / 2.0 * self.mm_per_count
         self.odo += d
         h = math.radians(self.gyro.heading)
         self.x += d * math.cos(h)
@@ -265,6 +228,13 @@ class Rover:
 
         m = self.mode
         c = self.cmd
+        if m != "idle":
+            wheel = self._stalled(counts)
+            if wheel:
+                self.halt()
+                send({"event": "stalled", "wheel": wheel, "mode": m})
+        self._last = counts
+        m = self.mode
         if m == "idle":
             return
 
@@ -275,10 +245,11 @@ class Rover:
 
         if m == "drive":
             v = clamp(float(c.get("v", 0)), -1.0, 1.0)
-            self.apply(*kin.car(self.geo, v, float(c.get("steer", 0))))
+            turn = clamp(float(c.get("turn", 0)), -1.0, 1.0)
+            self.apply(*kin.mix(v, turn))
 
         elif m == "spin":
-            self.apply(*kin.spin(self.geo, clamp(float(c.get("rate", 0)), -1.0, 1.0)))
+            self.apply(*kin.spin(clamp(float(c.get("rate", 0)), -1.0, 1.0)))
 
         elif m == "move":
             target = float(c.get("dist", 0))
@@ -292,8 +263,9 @@ class Rover:
             v = max(C.MOVE_MIN_SPEED, v * min(1.0, abs(remaining) / C.MOVE_SLOWDOWN_MM))
             v = math.copysign(v, remaining)
             err = float(c.get("heading", self.gyro.heading)) - self.gyro.heading
-            steer = clamp(C.HEADING_KP * err * (1 if v > 0 else -1), -C.MAX_STEER_DEG, C.MAX_STEER_DEG)
-            self.apply(*kin.car(self.geo, v, steer))
+            # turn > 0 yaws CCW in both directions of travel, so no sign flip in reverse
+            turn = clamp(C.HEADING_KP * err, -C.HEADING_MAX_TURN, C.HEADING_MAX_TURN)
+            self.apply(*kin.mix(v, turn))
 
         elif m == "turn_to":
             err = float(c.get("heading", 0)) - self.gyro.heading
@@ -304,7 +276,7 @@ class Rover:
             limit = abs(float(c.get("rate", 0.4)))
             rate = clamp(C.TURN_KP * err, -limit, limit)
             rate = math.copysign(max(abs(rate), C.TURN_MIN_RATE), rate)
-            self.apply(*kin.spin(self.geo, rate))
+            self.apply(*kin.spin(rate))
 
     def telemetry(self):
         send({
@@ -350,7 +322,8 @@ def main():
                 last_tel = now
                 rover.telemetry()
     finally:
-        rover.drive.stop()      # never leave motors running on a crash
+        rover.left.stop()       # never leave motors running on a crash
+        rover.right.stop()
 
 
 main()
